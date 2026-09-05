@@ -57,7 +57,7 @@ void Command_Process(const Command_t *cmd) {
 							 (unsigned long)cmd->timestamp_ms, cmd->value);
 					UART_Println(Buffer);
             	} else {
-					UART_Println("Throttle Ignored");
+					UART_Println("Steer Ignored");
 				}
             }
             break;
