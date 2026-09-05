@@ -22,27 +22,22 @@ void Command_Process(const Command_t *cmd) {
     g_lastCmdType = cmd->type;
     g_lastCmdValue = cmd->value;
     taskEXIT_CRITICAL();
-    UART_TransmitChar('C');  // telemetry updated
 
     static char Buffer[64];
 
-    UART_TransmitChar('0');       // about to enter switch
     UART_TransmitChar(cmd->type); // print the actual type byte we're switching on
 
     // 3. Process actuation command and update output state variables
     switch (cmd->type) {
 		case 'T':
-			UART_TransmitChar('1');
 			if (cmd->value >= 0 && cmd->value <= 100) {
 				if(!g_currentBrake){
 					g_currentThrottle = (uint8_t)cmd->value;
 					Actuator_SetOutput(g_currentThrottle);
-					UART_TransmitChar('2'); // about to snprintf
 					snprintf(Buffer, sizeof(Buffer), "[%lu ms] Throttle set to %d\r\n",
 							 (unsigned long)cmd->timestamp_ms, cmd->value);
-					UART_TransmitChar('3'); // snprintf survived
+
 					UART_Println(Buffer);
-					UART_TransmitChar('4'); // println survived
 				} else {
 					UART_Println("Throttle Ignored");
 				}
@@ -51,15 +46,19 @@ void Command_Process(const Command_t *cmd) {
 
         case 'S': // Steering (-100 to +100)
             if (cmd->value >= -100 && cmd->value <= 100) {
-                g_currentSteering = (int8_t)cmd->value;
+            	if(!g_currentBrake){
+					g_currentSteering = (int8_t)cmd->value;
 
-                // Scale steering range (-100..100) to duty cycle (0..100%) for LED testing
-                uint8_t steerDuty = (uint8_t)(((int16_t)cmd->value + 100) / 2);
-                Actuator_SetOutput(steerDuty);
+					// Scale steering range (-100..100) to duty cycle (0..100%) for LED testing
+					uint8_t steerDuty = (uint8_t)(((int16_t)cmd->value + 100) / 2);
+					Actuator_SetOutput(steerDuty);
 
-                snprintf(Buffer, sizeof(Buffer), "[%lu ms] Steer set to %d\r\n",
-                         (unsigned long)cmd->timestamp_ms, cmd->value);
-                UART_Println(Buffer);
+					snprintf(Buffer, sizeof(Buffer), "[%lu ms] Steer set to %d\r\n",
+							 (unsigned long)cmd->timestamp_ms, cmd->value);
+					UART_Println(Buffer);
+            	} else {
+					UART_Println("Throttle Ignored");
+				}
             }
             break;
 
