@@ -95,5 +95,5 @@ This is the honest account of the bugs found while getting this running on real 
 
 ## 8. Submission Links
 
-- **GitHub repo:** https://github.com/AbdelrahmanHamada05/cuert-rtos-bridge
+- **GitHub repo:** [GitHub Repo](https://github.com/AbdelrahmanHamada05/cuert-rtos-bridge)
 - **Video:** [Watch the demo video](https://youtube.com/shorts/QWpuJO7d_to?feature=share)
