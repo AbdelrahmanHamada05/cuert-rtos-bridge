@@ -1,7 +1,7 @@
 # CUERT Pre-Interview Task — RTOS Command-to-Actuator Bridge
 
 **Board used:** ATmega32 (AVR)
-**Toolchain:** [Eclipse + AVR-GCC, Atmel Studio, avr-gcc/avrdude on the command line]
+**Toolchain:** Eclipse + AVR-GCC (via the AVR Eclipse plugin) — *confirm/correct this if it's not exactly right*
 **Serial terminal:** Tera Term
 **Baud rate:** **9600** — note this differs from the 115200 default mentioned in the task brief; the firmware initializes UART at 9600 (`UART_init(9600, F_CPU)`), so the terminal must be set to match.
 
@@ -20,9 +20,9 @@
 
 ## 2. How to Build and Flash
 
-1. Open the project in [EclipseIDE].
+1. Open the project in Eclipse IDE.
 2. Build the project (`Build All` / `make`).
-3. Flash via [USBasp] to the ATmega32.
+3. Flash via USBasp to the ATmega32.
 4. Confirm fuse bits select the external 16 MHz crystal (`CKSEL`/`SUT` fuses) — a fuse mismatch will make all UART and RTOS timing wrong even though the code itself is correct.
 
 ---
@@ -39,8 +39,8 @@
    |---|---|
    | `PING` | Acknowledges — proves UART + COMMAND_RX are alive. |
    | `THROTTLE <0-100>` | Sets LED brightness (PWM duty) to that percent, unless brake is active. |
-   | `STEER <-100..100>` | Records/logs steering value. |
-   | `BRAKE <0-100>` | Immediately overrides output; any value >0 forces output to 0 and **locks out throttle** until `BRAKE 0` is sent. |
+   | `STEER <-100..100>` | Records/logs steering value; output is not driven while brake is active (see §6, item 10). |
+   | `BRAKE <0-100>` | Immediately overrides output; any value >0 forces output to 0 and **locks out throttle and steer** until `BRAKE 0` is sent. |
 
 6. While idle: if no valid command arrives for 500 ms, the board logs `LINK LOST , failing safe` and the LED switches to a distinct blink pattern (alternating fully on/off every 100 ms). Sending any valid command immediately logs `[FAILSAFE] Link restored. Resuming operation.` and resumes normal output.
 7. `STATUS` prints once per second in the background the whole time, showing uptime, last command, and current throttle/steer/brake state — this runs continuously and independently of whatever else you're testing.
@@ -62,7 +62,7 @@
 
 ## 5. Safety Reasoning (Required Answer #2)
 
-**Why a stale/missing BRAKE matters more than a stale STEER:** losing steering input degrades control, but losing brake input can mean the vehicle can't be stopped — brake is the one command whose absence has to be treated as a worst-case safety event, not just a control-quality issue. That's why BRAKE is the only command type that (a) jumps the queue to the front and is never dropped, and (b) once active, **latches** — `Command_Process` will not let a subsequently-processed THROTTLE re-enable output while `g_currentBrake > 0`, so a stale queued THROTTLE arriving after a BRAKE can't silently undo it. Only an explicit `BRAKE 0` releases the lock.
+**Why a stale/missing BRAKE matters more than a stale STEER:** losing steering input degrades control, but losing brake input can mean the vehicle can't be stopped — brake is the one command whose absence has to be treated as a worst-case safety event, not just a control-quality issue. That's why BRAKE is the only command type that (a) jumps the queue to the front and is never dropped, and (b) once active, **latches** — `Command_Process` will not let a subsequently-processed THROTTLE or STEER re-enable the physical output while `g_currentBrake > 0`, so a stale queued command arriving after a BRAKE can't silently undo it. Only an explicit `BRAKE 0` releases the lock.
 
 **How the watchdog guarantees an actual fail-safe, not just silence:** the watchdog doesn't just stop updating the display — it actively forces the physical output into a distinct, continuously-driven blink pattern the moment 500 ms passes with no valid command, and logs the transition. This is a positive, visible action rather than "going quiet," which matters because a real CAN node has no way to distinguish "the driver intended this state to persist" from "the sender crashed" — treating prolonged silence as failure, unconditionally, is the only interpretation that's safe by default.
 
@@ -81,6 +81,7 @@ This is the honest account of the bugs found while getting this running on real 
 7. **A real stack overflow in `vStatusTask`**, caught using FreeRTOS's built-in `configCHECK_FOR_STACK_OVERFLOW = 2` + `vApplicationStackOverflowHook` — `snprintf` with several format arguments needed more stack than the task's original 140-byte allocation. Fixed by increasing `STATUS` and `ACTUATE` task stack sizes (both call `snprintf`) and slightly increasing `configTOTAL_HEAP_SIZE` to fit.
 8. **UART bytes could be lost during a fast pasted burst** (task's own "paste two lines at once" test) — the original polled RX only checked for a new byte once per scheduler tick, and the UART hardware only buffers a single byte in `UDR`; a second byte arriving before the first was read would silently overwrite it. Diagnosed by adding raw character markers through `Command_Process` and a raw RX echo, which showed a `BRAKE 100` line vanishing entirely under a pasted burst while working correctly when typed with any gap. Fixed by rewriting UART RX to be interrupt-driven with a small ring buffer (`USART_RXC_vect`), so bytes are captured by hardware the instant they arrive regardless of task scheduling.
 9. **Recovery-from-failsafe didn't restore the physical LED when triggered by `PING`** — `PING` and the watchdog's own recovery branch never called `Actuator_SetOutput()`, so if the last physical output state was the fail-safe blink, a `PING` would clear the `LINK LOST` state and log "restored" without ever telling the LED to return to the correct throttle/brake value. Fixed by having the watchdog's recovery branch explicitly re-assert the correct output (0 if brake is active, otherwise current throttle) whenever it clears the fail-safe flag.
+10. **STEER could drive the physical output even while brake was active** — the same class of bug as item 3, but in the `'S'` case: it called `Actuator_SetOutput(steerDuty)` unconditionally, so a STEER command could visibly override the braked output even though throttle was already correctly locked out. Fixed by applying the same `g_currentBrake == 0` guard to the STEER case as THROTTLE — `g_currentSteering` still updates and is tracked/logged either way, but the physical output is only driven by STEER when brake is not active. This makes the brake latch apply consistently to every command that can touch the physical output, not just throttle.
 
 ---
 
@@ -89,9 +90,10 @@ This is the honest account of the bugs found while getting this running on real 
 - **Verify the UART fix more rigorously under stress** — the interrupt-driven ring buffer should eliminate byte loss, but I'd want to stress-test with rapid automated bursts (not just manual pastes) to be confident there's no remaining edge case, and add an overflow counter to the ring buffer itself for visibility.
 - **Move to 32-bit ticks** (`configUSE_16_BIT_TICKS = 0`) if the port supports it, to remove the ~65 second uptime rollover entirely rather than just documenting it.
 - **Add a persistent "fail-safe engaged" flag to the STATUS output** — right now STATUS can print stale last-known throttle/brake values while the physical output is actually overridden by the watchdog's blink; a status task that reflects "failsafe active" explicitly would give a clearer picture of true system state.
+
 ---
 
 ## 8. Submission Links
 
-- **GitHub repo:** [https://github.com/AbdelrahmanHamada05/cuert-rtos-bridge]
-- **Video:** [fill in — LED + Tera Term running through the 9-step test live]
+- **GitHub repo:** https://github.com/AbdelrahmanHamada05/cuert-rtos-bridge
+- **Video:** [Watch the demo video](https://youtube.com/shorts/QWpuJO7d_to?feature=share)
